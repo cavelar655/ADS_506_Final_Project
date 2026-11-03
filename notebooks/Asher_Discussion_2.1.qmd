@@ -1,0 +1,113 @@
+---
+title: "ADS-506: Discussion 2.1"
+author: "Asher Frank"
+format:
+  html:
+    embed-resources: true
+editor: source
+execute:
+  echo: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(fpp3)
+library(readr)
+
+# Quarto resolves this path relative to this document's directory.
+requests <- read_csv("../data/get_it_done_requests_CD1_datasd.csv.gz")
+service_categories <- n_distinct(requests$service_name, na.rm = TRUE)
+
+# Count distinct request IDs, preserving the original aggregation.
+monthly_requests <- requests |>
+  mutate(Month = yearmonth(date_requested)) |>
+  group_by(Month) |>
+  summarise(Requests = n_distinct(service_request_id)) |>
+  as_tsibble(index = Month)
+
+# Exclude partial boundary months; fit both models to the full history.
+monthly_complete <- monthly_requests |>
+  filter(
+    Month >= yearmonth("2016 Jun"),
+    Month <= yearmonth("2026 Sep")
+  )
+
+fits <- monthly_complete |>
+  model(
+    ETS = ETS(Requests),
+    TSLM = TSLM(Requests ~ trend() + season())
+  )
+
+ets_fit <- fits |> select(ETS)
+training_accuracy <- accuracy(fits)
+ets_rmse <- training_accuracy |> filter(.model == "ETS") |> pull(RMSE)
+tslm_rmse <- training_accuracy |> filter(.model == "TSLM") |> pull(RMSE)
+ets_forecast <- ets_fit |> forecast(h = "12 months")
+```
+
+For this discussion, I explored the City of San Diego's [Get It Done service request dataset](https://data.sandiego.gov/datasets/get-it-done-reports/), focusing on Council District 1. This District 1 extract contains over 300,000 reports dating back to 2016 across 44 non-emergency service categories, including illegal dumping, parking violations, graffiti, encampments, etc. I aggregated the reports into monthly totals and used an automatically selected ETS model to forecast request volume.
+
+#### **Monthly Service Requests**
+
+```{r}
+#| label: fig-monthly-requests
+#| fig-alt: "Monthly service request counts for San Diego Council District 1, showing growth through about 2021 and more stable volume afterward."
+monthly_requests |>
+  autoplot(Requests) +
+  labs(
+    title = "Monthly Get It Done Service Requests",
+    subtitle = "San Diego City Council District 1, 2016-2026",
+    x = "Month",
+    y = "Number of Requests",
+    caption = "Source: City of San Diego Open Data Portal"
+  )
+```
+
+The initial plot shows substantial growth through approximately 2021, followed by relatively stable monthly volume. I was surprised that an STL decomposition revealed a fairly consistent annual pattern that wasn't nearly as obvious in the original chart.
+
+#### **STL Decomposition**
+
+```{r}
+#| label: fig-stl-decomposition
+#| fig-alt: "STL decomposition separating monthly request counts into trend, annual seasonal pattern, and remainder."
+monthly_complete |>
+  model(STL(Requests)) |>
+  components() |>
+  autoplot()
+```
+
+I tried TSLM and automatically selected ETS, using the complete months from June 2016 through September 2026 for both models. ETS fit the training data better (RMSE of about 271 versus 512 for TSLM), so I used it to forecast the next 12 months.
+
+#### **Model Parameters**
+
+```{r}
+#| label: ets-report
+report(ets_fit)
+```
+
+#### **12-Month Forecast**
+
+The plot shows only observations from October 2023 onward to make the forecast easier to see.
+
+```{r}
+#| label: fig-ets-forecast
+#| fig-alt: "Twelve-month ETS forecast with prediction intervals and observed request counts since October 2023."
+# Display recent observations for readability; the model uses the full training window.
+ets_forecast |>
+  autoplot(
+    monthly_complete |> filter(Month >= yearmonth("2023 Oct"))
+  ) +
+  labs(
+    title = "Forecast of Monthly Get It Done Service Requests",
+    subtitle = "ETS(M,A,M) | San Diego City Council District 1",
+    x = "Month",
+    y = "Number of Requests",
+    caption = "Source: City of San Diego Open Data Portal"
+  )
+```
+
+The forecast suggests monthly request volumes of approximately 2,600–4,000 over the next year, although the prediction intervals widen considerably. Since Get It Done launched in 2016, some of the early growth may reflect adoption of the reporting platform rather than an increase in underlying service needs.
+
+I’d be interested in teaming up with anyone who wants to explore this dataset or something similar, whether by examining the Get It Done program as a whole or focusing on a particular service category. There are also eight other City Council districts we could explore or compare.

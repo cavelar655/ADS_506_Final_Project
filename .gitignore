@@ -1,0 +1,24 @@
+# Quarto generated files
+.quarto/
+*_files/
+*.html
+*.pdf
+
+# R and RStudio
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# macOS
+.DS_Store
+
+# VS Code local settings
+.vscode/
+
+# Uncompressed datasets
+data/*.csv
+
+# Temporary files
+*.tmp
+*.log
