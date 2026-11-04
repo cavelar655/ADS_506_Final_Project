@@ -15,6 +15,7 @@ The baseline runs from October 2018 through October 2026. Matching reports first
 library(readr)
 library(dplyr)
 library(tsibble)
+library(fpp3)
 
 # Find the district files from the repo root or the notebooks folder.
 data_dir <- if (dir.exists("data")) "data" else "../data"
@@ -43,3 +44,54 @@ encampment_monthly <- tibble(Month = months) |>
 
 encampment_monthly
 ```
+
+
+
+```{r}
+# training/validation sets for the model 
+encampment_monthly_trn <- encampment_monthly|>
+  filter_index(. ~ '2025 Oct')
+encampment_monthly_tst <- encampment_monthly|>
+  filter_index('2025 Oct' ~ .)
+
+fit <- encampment_monthly_trn |>
+  model(
+    tslm_manual = TSLM(Requests ~ trend() + covid),
+    tslm_auto   = TSLM(Requests ~ trend())
+  )
+
+fit |> glance()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
