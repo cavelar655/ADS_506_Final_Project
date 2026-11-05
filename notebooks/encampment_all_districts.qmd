@@ -63,6 +63,19 @@ fit <- encampment_monthly_trn |>
 fit |> glance()
 ```
 
+```{r}
+fc <- fit |> forecast(new_data = encampment_monthly_tst)
+
+# Forecasts vs. actual
+fc |> autoplot(encampment_monthly, level = NULL)
+
+# Fitted vs. actual on training data
+augment(fit) |> autoplot(Requests) + autolayer(augment(fit), .fitted)
+
+# Residuals
+fit |> select(tslm_manual) |> gg_tsresiduals()
+fit |> select(tslm_auto) |> gg_tsresiduals()
+```
 
 
 
