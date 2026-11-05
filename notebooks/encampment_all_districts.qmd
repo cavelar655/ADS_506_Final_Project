@@ -56,7 +56,7 @@ encampment_monthly_tst <- encampment_monthly|>
 
 fit <- encampment_monthly_trn |>
   model(
-    tslm_manual = TSLM(Requests ~ trend() + covid),
+    tslm_manual = TSLM(Requests ~ trend() + season()),
     tslm_auto   = TSLM(Requests ~ trend())
   )
 
