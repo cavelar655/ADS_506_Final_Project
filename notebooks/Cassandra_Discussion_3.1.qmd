@@ -16,30 +16,39 @@ file.copy(from = "encampment_all_districts.qmd", to = "ADS_506_Final_Project/not
 encampment_monthly_trn <- encampment_monthly|>
   filter_index(. ~ '2025 Oct')
 encampment_monthly_tst <- encampment_monthly|>
-  filter_index('2025 Oct' ~ .)
+  filter_index('2025 Nov' ~ .)
 
 fit <- encampment_monthly_trn |>
   model(
-    tslm_manual = TSLM(Requests ~ trend() + season()),
-    tslm_auto   = TSLM(Requests ~ trend())
+    trend_only   = TSLM(Requests ~ trend()),
+    season_only  = TSLM(Requests ~ season()),
+    trend_season = TSLM(Requests ~ trend() + season()), # manual model
   )
 
-fit |> glance()
+glance(fit) |>
+  select(.model, r_squared, adj_r_squared, AIC, AICc, BIC) |>
+  arrange(AICc)
 ```
 
 
 ```{r}
 fc <- fit |> forecast(new_data = encampment_monthly_tst)
 
-# Forecasts vs. actual
-fc |> autoplot(encampment_monthly, level = NULL)
+accuracy(fc, encampment_monthly) |>
+  select(.model, RMSE, MAE) |>
+  arrange(RMSE)
 
-# Fitted vs. actual on training data
-augment(fit) |> autoplot(Requests) + autolayer(augment(fit), .fitted)
+fc |>
+  filter(.model %in% c("trend_season", "trend_only")) |>
+  autoplot(encampment_monthly, level = NULL) +
+  labs(title = "TSLM Manual vs. Auto-Selected Forecasts",
+       y = "Requests")
 
-# Residuals
-fit |> select(tslm_manual) |> gg_tsresiduals()
-fit |> select(tslm_auto) |> gg_tsresiduals()
+augment(fit) |>
+  filter(.model %in% c("trend_season", "trend_only")) |>
+  autoplot(Requests, color = "gray40") +
+  geom_line(aes(y = .fitted, color = .model)) +
+  labs(title = "Fitted vs. Actual (Training Data)", y = "Requests")
 ```
 
 
