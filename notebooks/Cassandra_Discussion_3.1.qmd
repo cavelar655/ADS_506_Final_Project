@@ -9,8 +9,6 @@ file.copy(from = "encampment_all_districts.qmd", to = "Cassandra_Discussion_3.1.
 file.copy(from = "encampment_all_districts.qmd", to = "ADS_506_Final_Project/notebooks/encampment_all_districts.qmd")
 ```
 
-
-
 ```{r}
 # training/validation sets for the model 
 encampment_monthly_trn <- encampment_monthly|>
@@ -29,7 +27,6 @@ glance(fit) |>
   select(.model, r_squared, adj_r_squared, AIC, AICc, BIC) |>
   arrange(AICc)
 ```
-
 
 ```{r}
 fc <- fit |> forecast(new_data = encampment_monthly_tst)
@@ -50,6 +47,42 @@ augment(fit) |>
   geom_line(aes(y = .fitted, color = .model)) +
   labs(title = "Fitted vs. Actual (Training Data)", y = "Requests")
 ```
+
+
+```{r}
+encampment_monthly_trn |>
+  autoplot(Requests) +
+  labs(title = "Monthly Requests (Training)")
+```
+
+
+```{r}
+encampment_monthly_trn |>
+  as_tibble() |>
+  mutate(
+    roll_mean = slider::slide_dbl(Requests, mean, .before = 5, .complete = TRUE),
+    roll_sd   = slider::slide_dbl(Requests, sd,   .before = 5, .complete = TRUE)
+  ) |>
+  ggplot(aes(roll_mean, roll_sd)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE)
+```
+
+
+```{r}
+fit |> select(trend_only) |> gg_tsresiduals()
+
+encampment_monthly_trn |> features(Requests, features = guerrero)
+```
+
+
+
+
+
+
+
+
+
 
 
 
