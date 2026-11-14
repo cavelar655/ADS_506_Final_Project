@@ -32,17 +32,17 @@ glance(fit) |>
 fc <- fit |> forecast(new_data = encampment_monthly_tst)
 
 accuracy(fc, encampment_monthly) |>
-  select(.model, RMSE, MAE) |>
+  select(.model, RMSE, MAE, MAPE) |>
   arrange(RMSE)
 
 fc |>
-  filter(.model %in% c("trend_season", "trend_only")) |>
+  filter(.model %in% c("trend_season", "trend_only", "season_only")) |>
   autoplot(encampment_monthly, level = NULL) +
   labs(title = "TSLM Manual vs. Auto-Selected Forecasts",
        y = "Requests")
 
 augment(fit) |>
-  filter(.model %in% c("trend_season", "trend_only")) |>
+  filter(.model %in% c("trend_season", "trend_only", "season_only")) |>
   autoplot(Requests, color = "gray40") +
   geom_line(aes(y = .fitted, color = .model)) +
   labs(title = "Fitted vs. Actual (Training Data)", y = "Requests")
@@ -70,15 +70,42 @@ encampment_monthly_trn |>
 
 
 ```{r}
-fit |> select(trend_only) |> gg_tsresiduals()
-
-encampment_monthly_trn |> features(Requests, features = guerrero)
+fit |> select(season_only) |> gg_tsresiduals()
 ```
 
 
 
+```{r}
+# Refit and validate with log transformation
+fit2 <- encampment_monthly_trn |>
+  model(
+    season_only  = TSLM(Requests ~ season()),
+    season_only_log = TSLM(log(Requests) ~ season()),
+    #trend_only = TSLM(Requests ~ trend()),
+    #trend_only_log   = TSLM(log(Requests) ~ trend()),
+    #trend_season = TSLM(Requests ~ trend() + season()), # manual model
+    #trend_season_log = TSLM(log(Requests) ~ trend() + season())
+  )
+
+fit2 |>
+  forecast(new_data = encampment_monthly_tst) |>
+  accuracy(encampment_monthly) |>
+  select(.model, RMSE, MAE, MAPE) |>
+  arrange(RMSE)
+
+final_fc <- fit2 |> forecast(h = "12 months")
+
+final_fc |>
+  autoplot(encampment_monthly) +
+  labs(title = "12-Month TSLM Forecast: Nov 2025 to Oct 2026", y = "Requests")
+
+```
 
 
+```{r}
+# final forecast residuals 
+fit2 |> select(season_only_log) |> gg_tsresiduals() # change it to final_fc 
+```
 
 
 
