@@ -1,0 +1,215 @@
+---
+title: "Encampment Reports Across Nine Council Districts"
+format:
+  html:
+    embed-resources: true
+execute:
+  message: false
+---
+
+This notebook builds a shared monthly series for comparing forecasting models. All nine district extracts use `Encampment` in the `service_name` column. Each distinct service request is counted in its reported calendar month.
+
+The baseline runs from October 2018 through October 2026. Matching reports first appear during August or September 2018, depending on the district, and the extracts end on November 1, 2026.
+
+```{r}
+library(readr)
+library(dplyr)
+library(tsibble)
+library(fpp3)
+
+# Find the district files from the repo root or the notebooks folder.
+data_dir <- "C:/Users/ekali/Downloads/ADS_506_Final_Project-main/ADS_506_Final_Project-main/data"
+
+files <- file.path(data_dir,
+  sprintf("get_it_done_requests_CD%d_datasd.csv.gz", 1:9))
+
+# Read and combine the nine files, keeping only the columns we need.
+reports <- read_csv(
+  files,
+  col_select = c(service_request_id, date_requested, service_name),
+  show_col_types = FALSE
+)
+
+# Count distinct encampment reports by the month they were submitted.
+monthly_counts <- reports |>
+  filter(service_name == "Encampment") |>
+  mutate(Month = yearmonth(date_requested)) |>
+  group_by(Month) |>
+  summarise(Requests = n_distinct(service_request_id))
+
+# Start with the shared calendar so months with no reports get a zero.
+months <- seq(yearmonth("2018 Oct"), yearmonth("2026 Oct"), by = 1)
+encampment_monthly <- tibble(Month = months) |>
+  left_join(monthly_counts, by = "Month") |>
+  mutate(Requests = coalesce(Requests, 0L)) |>
+  as_tsibble(index = Month)
+
+encampment_monthly
+```
+
+```{r}
+train <- encampment_monthly |>
+  filter(Month <= yearmonth("2025 Oct"))
+
+test <- encampment_monthly |>
+  filter(Month >= yearmonth("2025 Nov"))
+
+nrow(train)
+nrow(test)
+```
+```{r}
+# Manual and automatic ETS models
+fits <- train |>
+  model(manual = ETS(Requests ~ error("A") + trend("Ad") + season("N")),
+    auto = ETS(Requests))
+
+fits
+glance(fits)
+```
+
+```{r}
+# Forecast the next 12 months
+forecasts <- fits |>
+  forecast(h = 12)
+
+# Manual ETS forecast
+forecasts |>
+  filter(.model == "manual") |>
+  autoplot(encampment_monthly) +
+  labs(title = "Manual ETS Forecast",
+       x = "Month",
+       y = "Encampment Reports")
+
+# Automatic ETS forecast
+forecasts |>
+  filter(.model == "auto") |>
+  autoplot(encampment_monthly) +
+  labs(title = "Automatic ETS Forecast",
+       x = "Month",
+       y = "Encampment Reports")
+```
+```{r}
+accuracy(forecasts, test) |>
+  select(.model, RMSE, MAE, MAPE)
+```
+
+Log transformation
+```{r}
+encampment_monthly |>
+  mutate(Log_Requests = log1p(Requests)) |>
+  select(Month, Requests, Log_Requests) |>
+  pivot_longer(
+    cols = c(Requests, Log_Requests),
+    names_to = "Series",
+    values_to = "Value") |>
+  ggplot(aes(x = Month, y = Value)) +
+  geom_line() +
+  facet_wrap(~ Series, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Original and Log-Transformed Encampment Reports",
+    x = "Month",
+    y = "Value")
+
+```
+```{r}
+log_fit <- train |> model(Log_ETS = ETS(log1p(Requests)))
+
+report(log_fit)
+
+```
+```{r}
+log_forecasts <- log_fit |>
+  forecast(h = 12)
+
+original_accuracy <- accuracy(forecasts, test) |>
+  select(.model, RMSE, MAE, MAPE)
+
+transformed_accuracy <- accuracy(log_forecasts, test) |>
+  select(.model, RMSE, MAE, MAPE)
+
+bind_rows(original_accuracy, transformed_accuracy)
+
+```
+```{r}
+log_forecasts |>
+  autoplot(
+    encampment_monthly |>
+      filter(Month >= yearmonth("2024 Nov"))) +
+  autolayer(log_fit |>
+      augment() |>
+      filter(Month >= yearmonth("2024 Nov")),
+    .fitted,
+    color = "green") +
+  labs(title = "Log-Transformed ETS Forecast",
+    x = "Month",
+    y = "Number of Encampment Reports")
+```
+
+Square root transformation
+```{r}
+sqrt_fit <- train |>
+  model(Sqrt_ETS = ETS(sqrt(Requests)))
+
+report(sqrt_fit)
+
+sqrt_forecasts <- sqrt_fit |>
+  forecast(h = 12)
+
+accuracy(sqrt_forecasts, test) |>
+  select(.model, RMSE, MAE, MAPE)
+
+```
+Box-Cox transformation
+```{r}
+boxcox_fit <- train |>
+  model(
+    BoxCox_025 = ETS(box_cox(Requests, 0.25)),
+    BoxCox_050 = ETS(box_cox(Requests, 0.50)),
+    BoxCox_075 = ETS(box_cox(Requests, 0.75)))
+
+report(boxcox_fit)
+
+boxcox_forecasts <- boxcox_fit |>
+  forecast(h = 12)
+
+accuracy(boxcox_forecasts, test) |>
+  select(.model, RMSE, MAE, MAPE)
+
+```
+Seasonality transformation
+```{r}
+encampment_monthly |>
+  gg_season(Requests, labels = "both") +
+  labs(title = "Seasonal Patterns in Encampment Reports",
+    y = "Number of Reports")
+
+```
+```{r}
+
+encampment_monthly |>
+  model(STL(Requests ~ season(window = "periodic"))) |>
+  components() |>
+  autoplot() +
+  labs(title = "Seasonal Decomposition of Encampment Reports")
+
+```
+```{r}
+seasonal_fit <- train |>
+  model(
+    Log_No_Season = ETS(
+      log1p(Requests) ~ error("A") +
+        trend("N") + season("N")),
+    Log_Seasonal = ETS(
+      log1p(Requests) ~ error("A") +
+        trend("N") + season("A")))
+
+report(seasonal_fit)
+
+seasonal_forecasts <- seasonal_fit |>
+  forecast(h = 12)
+
+accuracy(seasonal_forecasts, test) |>
+  select(.model, RMSE, MAE, MAPE)
+
+```
+
