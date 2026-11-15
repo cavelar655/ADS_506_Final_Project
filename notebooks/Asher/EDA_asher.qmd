@@ -76,6 +76,12 @@ reports |>
   count(service_request_id) |>
   filter(n > 1)
 
+# Check whether IDs occur in multiple months.
+reports |>
+  distinct(service_request_id, Month) |>
+  count(service_request_id) |>
+  filter(n > 1)
+
 # Identify missing district months and check for other reporting activity.
 district_gaps <- scan_gaps(encampment_district_monthly, .full = TRUE)
 district_gaps
@@ -108,6 +114,8 @@ encampment_district_monthly |>
       District_Total != Requests
   )
 ```
+
+The 52 repeated request IDs in the full data each occur in a single month and district. Counting distinct IDs within each group prevents those repeats from inflating monthly totals. No IDs repeat in the encampment subset.
 
 District 5 had other Get It Done activity in each of the four months above, so those months enter the encampment series as explicit zeros.
 
@@ -143,10 +151,6 @@ city_stl |>
 
 ```{r}
 encampment_monthly |>
-  ACF(Requests) |>
-  autoplot()
-
-encampment_monthly |>
   features(
     Requests,
     list(
@@ -157,8 +161,17 @@ encampment_monthly |>
   )
 
 # Check the citywide series after one regular difference.
-encampment_monthly |>
+encampment_diff <- encampment_monthly |>
   mutate(Diff_Requests = difference(Requests)) |>
+  drop_na(Diff_Requests)
+
+encampment_diff |>
+  ggtime::gg_tsdisplay(
+    Diff_Requests,
+    plot_type = "partial"
+  )
+
+encampment_diff |>
   features(Diff_Requests, list(unitroot_ndiffs, unitroot_kpss))
 ```
 
