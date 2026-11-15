@@ -1,0 +1,299 @@
+---
+title: "Exploratory analysis of encampment reports"
+format:
+  html:
+    embed-resources: true
+execute:
+  message: false
+---
+
+## Build and verify the monthly series
+
+The analysis counts distinct Get It Done service request IDs from October 2018 through September 2026. Counts describe reports submitted through the platform.
+
+```{r}
+library(fpp3)
+library(purrr)
+library(readr)
+
+data_paths <- c("data", "../data", "../../data")
+data_dir <- data_paths[dir.exists(data_paths)][1]
+
+reports <- map_dfr(1:9, \(district) {
+  file <- file.path(
+    data_dir,
+    sprintf("get_it_done_requests_CD%d_datasd.csv.gz", district)
+  )
+
+  read_csv(
+    file,
+    col_select = c(
+      service_request_id,
+      date_requested,
+      service_name
+    ),
+    show_col_types = FALSE
+  ) |>
+    mutate(District = district)
+}) |>
+  filter(
+    date_requested >= as.Date("2018-10-01"),
+    date_requested < as.Date("2026-10-01")
+  ) |>
+  mutate(Month = yearmonth(date_requested))
+
+encampment_reports <- reports |>
+  filter(service_name == "Encampment")
+
+encampment_monthly <- encampment_reports |>
+  summarise(
+    Requests = n_distinct(service_request_id),
+    .by = Month
+  ) |>
+  as_tsibble(index = Month)
+
+encampment_district_monthly <- encampment_reports |>
+  summarise(
+    Requests = n_distinct(service_request_id),
+    .by = c(District, Month)
+  ) |>
+  as_tsibble(key = District, index = Month)
+```
+
+```{r}
+# Check for duplicate request IDs.
+reports |>
+  count(service_request_id) |>
+  filter(n > 1)
+
+encampment_reports |>
+  count(service_request_id) |>
+  filter(n > 1)
+
+# Check whether IDs occur in multiple districts.
+reports |>
+  distinct(service_request_id, District) |>
+  count(service_request_id) |>
+  filter(n > 1)
+
+# Identify missing district months and check for other reporting activity.
+district_gaps <- scan_gaps(encampment_district_monthly, .full = TRUE)
+district_gaps
+
+reports |>
+  semi_join(district_gaps, by = c("District", "Month")) |>
+  summarise(
+    Other_Requests = n_distinct(service_request_id),
+    .by = c(District, Month)
+  )
+
+encampment_district_monthly <- encampment_district_monthly |>
+  fill_gaps(Requests = 0L, .full = TRUE)
+
+encampment_district_monthly |>
+  as_tibble() |>
+  count(District, name = "Months")
+
+encampment_district_monthly |>
+  scan_gaps(.full = TRUE)
+
+# Show any months where the district and citywide counts differ.
+encampment_district_monthly |>
+  as_tibble() |>
+  summarise(District_Total = sum(Requests), .by = Month) |>
+  full_join(as_tibble(encampment_monthly), by = "Month") |>
+  filter(
+    is.na(District_Total) |
+      is.na(Requests) |
+      District_Total != Requests
+  )
+```
+
+District 5 had other Get It Done activity in each of the four months above, so those months enter the encampment series as explicit zeros.
+
+## Citywide diagnostics
+
+```{r}
+encampment_monthly |>
+  autoplot(Requests) +
+  labs(
+    title = "Monthly Encampment Reports",
+    x = "Month",
+    y = "Number of reports"
+  )
+```
+
+```{r}
+city_stl <- encampment_monthly |>
+  model(STL(Requests)) |>
+  components()
+
+autoplot(city_stl)
+
+encampment_monthly |>
+  features(Requests, feat_stl) |>
+  select(trend_strength, seasonal_strength_year)
+
+city_stl |>
+  as_tibble() |>
+  mutate(Remainder_Z = as.numeric(scale(remainder))) |>
+  filter(abs(Remainder_Z) > 3) |>
+  select(Month, Requests, remainder, Remainder_Z)
+```
+
+```{r}
+encampment_monthly |>
+  ACF(Requests) |>
+  autoplot()
+
+encampment_monthly |>
+  features(
+    Requests,
+    list(
+      guerrero,
+      unitroot_nsdiffs,
+      unitroot_ndiffs
+    )
+  )
+
+# Check the citywide series after one regular difference.
+encampment_monthly |>
+  mutate(Diff_Requests = difference(Requests)) |>
+  features(Diff_Requests, list(unitroot_ndiffs, unitroot_kpss))
+```
+
+## Compare districts
+
+```{r}
+encampment_district_monthly |>
+  ggplot(aes(x = Month, y = Requests)) +
+  geom_line() +
+  facet_wrap(~ District, scales = "free_y") +
+  labs(
+    title = "Monthly Encampment Reports by District",
+    x = "Month",
+    y = "Number of reports"
+  )
+```
+
+Volume is the total across the 96 months. Trend and annual seasonal strength come from `feat_stl()`. Anomalies are months whose STL remainder is more than three standard deviations from its district mean. Guerrero lambda is reported for positive series only, so District 5 has no estimate. The other diagnostics use the original counts, including zeros.
+
+We estimate seasonal differences first, then estimate regular differences on the resulting series. KPSS tests level stationarity after the recommended differences, or on the original counts if both recommendations are zero. The reported p-values are approximate and bounded by the test's tabulated values. [feasts differencing documentation](https://feasts.tidyverts.org/reference/unitroot_ndiffs.html)
+
+```{r}
+district_anomalies <- encampment_district_monthly |>
+  model(STL(Requests)) |>
+  components() |>
+  as_tibble() |>
+  summarise(
+    Anomalies = sum(abs(scale(remainder)) > 3),
+    .by = District
+  )
+
+district_comparison <- encampment_district_monthly |>
+  as_tibble() |>
+  group_by(District) |>
+  group_modify(function(data, key) {
+    requests <- data$Requests
+    seasonal_diffs <- unitroot_nsdiffs(requests, .period = 12)[["nsdiffs"]]
+    adjusted <- requests
+    if (seasonal_diffs > 0) {
+      adjusted <- diff(adjusted, lag = 12, differences = seasonal_diffs)
+    }
+
+    regular_diffs <- unitroot_ndiffs(adjusted)[["ndiffs"]]
+    if (regular_diffs > 0) {
+      adjusted <- diff(adjusted, differences = regular_diffs)
+    }
+
+    strength <- feat_stl(requests, .period = c(year = 12))
+    lambda <- if (all(requests > 0)) {
+      guerrero(requests, .period = 12)[["lambda_guerrero"]]
+    } else {
+      NA_real_
+    }
+    kpss <- unitroot_kpss(adjusted)
+    tibble(
+      Volume = sum(requests),
+      Trend = strength[["trend_strength"]],
+      Seasonality = strength[["seasonal_strength_year"]],
+      Lambda = lambda,
+      Seasonal_Diffs = seasonal_diffs,
+      Regular_Diffs = regular_diffs,
+      KPSS = kpss[["kpss_stat"]],
+      KPSS_p = kpss[["kpss_pvalue"]]
+    )
+  }) |>
+  ungroup() |>
+  left_join(district_anomalies, by = "District") |>
+  relocate(Anomalies, .before = KPSS)
+
+knitr::kable(
+  district_comparison,
+  digits = 3,
+  col.names = c(
+    "District",
+    "Volume",
+    "Trend strength",
+    "Annual seasonal strength",
+    "Guerrero lambda",
+    "Seasonal differences",
+    "Regular differences",
+    "STL anomalies",
+    "KPSS statistic",
+    "KPSS p-value"
+  )
+)
+```
+
+## Encampment reporting share
+
+The plots use all Get It Done requests in the corresponding month and area as the denominator.
+
+```{r}
+reports |>
+  summarise(
+    Total_Requests = n_distinct(service_request_id),
+    .by = Month
+  ) |>
+  left_join(as_tibble(encampment_monthly), by = "Month") |>
+  mutate(Encampment_Share = coalesce(Requests, 0L) / Total_Requests) |>
+  ggplot(aes(x = Month, y = Encampment_Share)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(
+    title = "Encampment Reports as a Share of All Get It Done Requests",
+    x = "Month",
+    y = "Share of requests"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+reports |>
+  summarise(
+    Total_Requests = n_distinct(service_request_id),
+    .by = c(District, Month)
+  ) |>
+  left_join(
+    as_tibble(encampment_district_monthly),
+    by = c("District", "Month")
+  ) |>
+  mutate(Encampment_Share = coalesce(Requests, 0L) / Total_Requests) |>
+  ggplot(
+    aes(
+      x = Month,
+      y = Encampment_Share,
+      color = factor(District)
+    )
+  ) +
+  geom_line(linewidth = 0.8, alpha = 0.85) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(
+    title = "Encampment Reporting Share by District",
+    x = "Month",
+    y = "Share of district requests",
+    color = "District"
+  ) +
+  theme_minimal()
+```
