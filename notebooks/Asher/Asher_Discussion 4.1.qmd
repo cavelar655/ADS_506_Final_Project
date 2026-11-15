@@ -1,0 +1,437 @@
+---
+title: "ADS-506: Discussion 3.1"
+author: "Asher Frank"
+format:
+  html:
+    embed-resources: true
+editor: source
+execute:
+  echo: false
+  message: false
+---
+
+
+```{r}
+#| label: setup
+#| include: false
+library(readr)
+library(dplyr)
+library(tsibble)
+library(fpp3)
+library(gt)
+```
+
+```{r}
+#| label: prepare-monthly-series
+#| include: false
+# Quarto resolves this path from Module 3/Assignments.
+data_dir <- "Final Project/Data"
+files <- file.path(
+  data_dir,
+  sprintf("get_it_done_requests_CD%d_datasd.csv", 1:9)
+)
+
+# Read and combine the nine files, keeping only the columns we need.
+reports <- read_csv(
+  files,
+  col_select = c(service_request_id, date_requested, service_name),
+  show_col_types = FALSE
+)
+
+# Count distinct encampment reports by the month they were submitted.
+monthly_counts <- reports |>
+  filter(service_name == "Encampment") |>
+  mutate(Month = yearmonth(date_requested)) |>
+  group_by(Month) |>
+  summarise(Requests = n_distinct(service_request_id))
+
+# Start with the shared calendar so months with no reports get a zero.
+months <- seq(yearmonth("2018 Oct"), yearmonth("2026 Oct"), by = 1)
+encampment_monthly <- tibble(Month = months) |>
+  left_join(monthly_counts, by = "Month") |>
+  mutate(Requests = coalesce(Requests, 0L)) |>
+  as_tsibble(index = Month)
+
+encampment_monthly
+```
+
+My team chose the City of San Diego's Get It Done service request dataset for our final project, focusing on monthly encampment reports across all nine City Council districts. Our dataset contains 97 months of observations from October 2018 through October 2026, counting distinct service request IDs to avoid duplicates. For my ARIMA analysis, I used the first 85 months for training and reserved the final 12 months (November 2025–October 2026) to evaluate forecast accuracy.
+
+#### **Choosing a Manual ARIMA Model**
+
+The KPSS test indicated that the training series was nonstationary (p = 0.01), and the differencing diagnostics suggested one ordinary difference (d = 1) without seasonal differencing (D = 0). After differencing, the ACF and PACF showed negative autocorrelation at lag 1 and positive autocorrelation at lag 12, suggesting possible nonseasonal and seasonal AR or MA terms.
+
+
+```{r}
+#| label: monthly-requests
+#| include: false
+encampment_monthly |>
+  autoplot(Requests) +
+  labs(
+    title = "Monthly Encampment Reports in San Diego",
+    x = "Month",
+    y = "Number of Requests"
+  )
+```
+
+```{r}
+#| label: stl-decomposition
+#| include: false
+encampment_monthly |>
+  model(STL(Requests)) |>
+  components() |>
+  autoplot()
+```
+
+```{r}
+#| label: train-test-split
+#| include: false
+# create training/validation sets for the model
+encampment_trn <- encampment_monthly |>
+  slice_head(n = -12)
+
+encampment_tst <- encampment_monthly |>
+  slice_tail(n = 12)
+
+encampment_trn |>
+  as_tibble() |>
+  summarise(
+    Start = min(Month),
+    End = max(Month),
+    Months = n()
+  )
+
+encampment_tst |>
+  as_tibble() |>
+  summarise(
+    Start = min(Month),
+    End = max(Month),
+    Months = n()
+  )
+```
+
+```{r}
+#| label: stationarity-checks
+#| include: false
+# Check stationarity and seasonal differencing requirements
+encampment_trn |>
+  features(Requests, unitroot_kpss)
+
+encampment_trn |>
+  features(Requests, unitroot_ndiffs)
+
+encampment_trn |>
+  features(Requests, unitroot_nsdiffs)
+```
+
+```{r}
+#| label: first-difference
+#| include: false
+encampment_trn |>
+  mutate(Diff = difference(Requests)) |>
+  autoplot(Diff) +
+  labs(
+    title = "First-Differenced Monthly Encampment Reports",
+    x = "Month",
+    y = "Monthly Change in Requests"
+  )
+```
+
+```{r}
+#| label: fig-differenced-acf-pacf
+#| fig-width: 10
+#| warning: false
+#| fig-alt: "First-differenced training series with its autocorrelation and partial autocorrelation plots through lag 24."
+diagnostic_plot <- encampment_trn |>
+  mutate(Diff = difference(Requests)) |>
+  gg_tsdisplay(Diff, plot_type = "partial", lag = 24)
+
+# Give the rightmost axis labels room inside each panel.
+for (panel in seq_along(diagnostic_plot)) {
+  diagnostic_plot[[panel]] <- diagnostic_plot[[panel]] +
+    theme(plot.margin = margin(5.5, 28, 5.5, 5.5))
+}
+diagnostic_plot
+```
+
+First-differenced training series with its autocorrelation and partial autocorrelation plots through lag 24.
+
+Based on the ACF and PACF patterns, I tested four manually specified ARIMA models with different combinations of nonseasonal AR and MA terms and seasonal AR or MA terms, then compared their AICc values on the training data.
+
+| Candidate | Specification | Training AICc |
+| --- | --- | ---: |
+| Automatic | ARIMA(1,1,0)(2,0,0)[12] | 1,258.52 |
+| Manual AR | ARIMA(1,1,0)(1,0,0)[12] | 1,263.13 |
+| Manual MA | ARIMA(0,1,1)(1,0,0)[12] | 1,264.16 |
+| Manual ARMA | ARIMA(1,1,1)(1,0,0)[12] | 1,265.03 |
+| Manual seasonal MA | ARIMA(0,1,1)(0,0,1)[12] | 1,266.49 |
+
+The manual AR model had the lowest AICc among the four manual candidates, so I selected it for comparison with the automatic model, which had the lowest AICc overall.
+
+
+```{r}
+#| label: fit-and-compare-models
+#| include: false
+# Fit manual and automatic ARIMA models
+arima_models <- encampment_trn |>
+  model(
+    MA = ARIMA(Requests ~ pdq(0, 1, 1) + PDQ(1, 0, 0)),
+    AR = ARIMA(Requests ~ pdq(1, 1, 0) + PDQ(1, 0, 0)),
+    ARMA = ARIMA(Requests ~ pdq(1, 1, 1) + PDQ(1, 0, 0)),
+    Seasonal_MA = ARIMA(Requests ~ pdq(0, 1, 1) + PDQ(0, 0, 1)),
+    Auto = ARIMA(Requests)
+  )
+
+# Compare model fit and complexity
+arima_models |>
+  glance() |>
+  arrange(AICc) |>
+  select(.model, AIC, AICc, BIC)
+
+# Examine fitted model specifications
+arima_models |>
+  select(Auto) |>
+  report()
+
+arima_models |>
+  select(AR) |>
+  report()
+
+# Check residual autocorrelation
+arima_models |>
+  augment() |>
+  features(.innov, ljung_box, lag = 24, dof = 0)
+```
+
+```{r}
+#| label: manual-residuals
+#| include: false
+# Manual ARIMA residual diagnostics
+arima_models |>
+  select(AR) |>
+  gg_tsresiduals()
+```
+
+```{r}
+#| label: automatic-residuals
+#| include: false
+# Automatic ARIMA residual diagnostics
+arima_models |>
+  select(Auto) |>
+  gg_tsresiduals()
+```
+
+#### **Forecast Comparison**
+
+I generated 12-month forecasts from both models and compared them against the observations in the test set.
+
+
+```{r}
+#| label: fig-holdout-forecasts
+#| results: hide
+#| fig-height: 7
+#| fig-alt: "Manual and automatic ARIMA holdout forecasts in separate panels, each showing observed counts and a 95 percent prediction interval."
+arima_fc <- arima_models |>
+  select(AR, Auto) |>
+  forecast(h = 12)
+
+arima_fc |>
+  autoplot(encampment_monthly, level = 95) +
+  facet_wrap(
+    vars(.model),
+    ncol = 1,
+    labeller = as_labeller(c(AR = "Manual ARIMA", Auto = "Automatic ARIMA"))
+  ) +
+  labs(
+    title = "Manual vs. Automatic ARIMA Forecasts",
+    x = "Month",
+    y = "Encampment Requests"
+  )
+
+arima_fc |>
+  accuracy(encampment_tst) |>
+  select(.model, .type, RMSE, MAE, MAPE)
+```
+
+Manual and automatic ARIMA holdout forecasts in separate panels, each showing observed counts and a 95 percent prediction interval.
+
+#### **How They Compared**
+
+| Test metric | Manual ARIMA | Automatic ARIMA |
+|---|---:|---:|
+| RMSE | 984 | 1,106 |
+| MAE | 836 | 933 |
+| MAPE | 19.6% | 21.8% |
+
+#### **Interpretation**
+
+Interestingly, despite having a higher AICc, the manual model performed better on all three test metrics, with approximately 11% lower RMSE. The automatic model included an additional seasonal AR term, but that added complexity didn't translate into better forecasts for this test period.
+
+Neither model anticipated the increase in encampment reports during 2026. The manual model stayed closer to the observed counts, while the automatic model projected a modest decline. This highlights how difficult it can be to forecast a series when its underlying trajectory changes.
+
+One important limitation is that these observations represent **reported service requests, not individual encampments**. Changes in reporting behavior or municipal practices could influence the counts, so increases in requests can't necessarily be interpreted as equivalent to increases in actual encampments.
+
+<!-- Personal analysis retained below. The Canvas post ends above. -->
+
+```{r}
+#| label: full-data-forecasts
+#| include: false
+# Refit the two orders selected on the training data using all observations
+arima_full <- encampment_monthly |>
+  model(
+    Manual = ARIMA(Requests ~ pdq(1, 1, 0) + PDQ(1, 0, 0)),
+    Auto = ARIMA(Requests ~ pdq(1, 1, 0) + PDQ(2, 0, 0))
+  )
+
+# Forecast the next 12 months
+arima_full_fc <- arima_full |>
+  forecast(h = 12)
+
+arima_full_fc |>
+  autoplot(encampment_monthly, level = c(80, 95)) +
+  facet_wrap(vars(.model), ncol = 1) +
+  labs(
+    title = "12-Month ARIMA Forecasts Using Full Dataset",
+    x = "Month",
+    y = "Encampment Requests"
+  )
+```
+
+<!-- Discussion 4.1 below. Discussion 3.1 ends above. -->
+
+## Discussion 4.1
+
+### 1. Original Model
+
+In Module 3, I selected an ARIMA(1,1,0)(1,0,0)[12] model to forecast monthly encampment-related Get It Done service requests in San Diego, using the first 85 months for training and the final 12 months for testing.
+
+### 2. Transformation Decision
+
+```{r}
+#| label: guerrero-estimate
+#| include: false
+lambda <- encampment_trn |>
+  features(Requests, guerrero) |>
+  pull(lambda_guerrero)
+```
+
+My original ARIMA residuals showed greater variability in later years, and the first-differenced series showed a similar pattern. Guerrero's method estimated a Box–Cox parameter of λ = `r sprintf("%.3f", lambda)`, suggesting that a moderate power transformation could help stabilize the variance. I also tested the natural log (λ = 0) because it compresses larger counts and lets me look at changes in relative terms (Hyndman & Athanasopoulos, 2021). I used the holdout forecasts to evaluate accuracy separately.
+
+```{r}
+#| label: fig-log-series
+#| fig-width: 7
+#| fig-height: 3.4
+#| fig-dpi: 180
+#| fig-alt: "Line plot of natural-log monthly encampment requests in the training data, from October 2018 through October 2025."
+encampment_trn |>
+  autoplot(log(Requests)) +
+  labs(
+    title = "Log-Transformed Monthly Encampment Reports",
+    x = "Month",
+    y = "Natural Log of Requests"
+  ) +
+  scale_x_yearmonth(date_breaks = "2 years", date_labels = "%Y") +
+  theme_minimal(base_size = 12)
+```
+
+### 3. Refitted Model and Forecast
+
+I refitted the model to the log of monthly requests using the same ARIMA(1,1,0)(1,0,0)[12] orders and seasonal period.
+
+```{r}
+#| label: refit-transformation-models
+#| include: false
+transformation_models <- encampment_trn |>
+  model(
+    Original = ARIMA(Requests ~ pdq(1, 1, 0) + PDQ(1, 0, 0)),
+    Log = ARIMA(log(Requests) ~ pdq(1, 1, 0) + PDQ(1, 0, 0)),
+    BoxCox = ARIMA(box_cox(Requests, 0.384) ~ pdq(1, 1, 0) + PDQ(1, 0, 0)),
+    Naive = NAIVE(Requests),
+    SNaive = SNAIVE(Requests)
+  )
+
+coefficients <- transformation_models |>
+  select(Original, Log) |>
+  tidy() |>
+  select(.model, term, estimate) |>
+  pivot_wider(names_from = .model, values_from = estimate)
+
+log_model <- transformation_models |> select(Log)
+holdout_forecasts <- transformation_models |> forecast(h = 12)
+```
+
+```{r}
+#| label: coefficient-comparison
+coefficients |>
+  mutate(term = recode(term, ar1 = "Nonseasonal AR(1)", sar1 = "Seasonal AR(1)")) |>
+  gt() |>
+  tab_header(title = "ARIMA Coefficient Comparison") |>
+  cols_label(term = "Parameter", Original = "Original ARIMA", Log = "Log ARIMA") |>
+  fmt_number(columns = c(Original, Log), decimals = 3)
+```
+
+The nonseasonal AR(1) coefficient changed from `r sprintf("%.3f", coefficients$Original[coefficients$term == "ar1"])` to `r sprintf("%.3f", coefficients$Log[coefficients$term == "ar1"])`, reversing direction and decreasing in magnitude. The seasonal AR(1) coefficient also decreased, from `r sprintf("%.3f", coefficients$Original[coefficients$term == "sar1"])` to `r sprintf("%.3f", coefficients$Log[coefficients$term == "sar1"])`, indicating a weaker estimated seasonal autoregressive relationship on the transformed scale.
+
+I wanted to see how the log model’s forecasts compared with the actual monthly request counts. The black line shows the observed counts through October 2026, and the dashed fitted line ends in October 2025, where the training period ends.
+
+```{r}
+#| label: fig-log-forecast
+#| fig-width: 7
+#| fig-height: 3.8
+#| fig-dpi: 180
+#| fig-alt: "Observed counts through October 2026, dashed fitted values through October 2025, and a 12-month log ARIMA forecast with shaded prediction intervals over the holdout period. All values are on the original request-count scale."
+holdout_forecasts |>
+  filter(.model == "Log") |>
+  autoplot(encampment_monthly |> filter_index("2024 Jan" ~ .)) +
+  autolayer(
+    augment(log_model) |> filter_index("2024 Jan" ~ .),
+    .fitted,
+    colour = "#13578A",
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Log ARIMA Fitted Values and 12-Month Forecast",
+    subtitle = "Observed (black), fitted (dashed), forecast (blue)",
+    fill = "Prediction interval",
+    x = "Month",
+    y = "Monthly Requests"
+  ) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  theme_minimal(base_size = 12)
+```
+
+### 4. Forecast Accuracy and Insights
+
+I compared both ARIMA models with naïve and seasonal naïve benchmarks on the same 12-month holdout (November 2025–October 2026), using forecasts in request counts.
+
+```{r}
+#| label: holdout-accuracy
+holdout_accuracy <- holdout_forecasts |>
+  accuracy(encampment_tst) |>
+  select(.model, RMSE, MAE, MAPE)
+
+original <- holdout_accuracy |> filter(.model == "Original")
+logged <- holdout_accuracy |> filter(.model == "Log")
+
+holdout_accuracy |>
+  filter(.model != "BoxCox") |>
+  mutate(.model = recode(
+    .model,
+    Original = "Original ARIMA",
+    Log = "Log ARIMA",
+    Naive = "Naïve",
+    SNaive = "Seasonal naïve"
+  )) |>
+  arrange(RMSE) |>
+  gt() |>
+  tab_header(title = "Forecast Accuracy on the 12-Month Holdout") |>
+  cols_label(.model = "Model") |>
+  fmt_number(columns = c(RMSE, MAE), decimals = 0) |>
+  fmt_percent(columns = MAPE, decimals = 1, scale_values = FALSE)
+```
+
+Applying a log transformation substantially improved the forecasting accuracy of my manually specified ARIMA model on this holdout, reducing RMSE from `r round(original$RMSE)` to `r round(logged$RMSE)` (approximately `r sprintf("%.1f", 100 * (1 - logged$RMSE / original$RMSE))`%) and MAPE from `r sprintf("%.1f", original$MAPE)`% to `r sprintf("%.1f", logged$MAPE)`%. Guerrero's estimate of λ = `r sprintf("%.3f", lambda)` targeted variance stabilization, while the log transformation gave more accurate forecasts on this particular holdout. Interestingly, the log-transformed model also outperformed both naïve and seasonal naïve benchmarks, suggesting that it captured useful forecasting information beyond simple persistence or repeating the previous year's observations. Rolling-origin cross-validation would be a useful next step to determine whether these improvements persist across different forecasting periods.
+
+#### Reference
+
+Hyndman, R. J., & Athanasopoulos, G. (2021). *Forecasting: Principles and Practice* (3rd ed.). OTexts. <https://otexts.com/fpp3/>
